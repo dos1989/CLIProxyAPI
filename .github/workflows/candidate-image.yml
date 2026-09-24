@@ -69,3 +69,136 @@ jobs:
           name: candidate-image-reference
           path: candidate-image.ref
           if-no-files-found: error
+
+      - name: Run disposable CI staging smoke test
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          image_ref='${{ steps.metadata.outputs.image }}@${{ steps.build.outputs.digest }}'
+          scheduler_url='https://github.com/JefferyZhang2019/cpa-plugin-codex-quota-scheduler/releases/download/v0.3.2/codex-quota-scheduler_0.3.2_linux_amd64.zip'
+          scheduler_zip_sha256='f526274f4a596a9bfaa9c40e529b032d5a8e3c4b49dd6bb380086fedc2baba18'
+          scheduler_so_sha256='b2e022bff423af67035a76ecc43181597f3a8a2e6f5376e7043444ebbceaa633'
+          staging_api_key='schema6-ci-key'
+          stage_dir="$(mktemp -d)"
+          container_name="cli-proxy-api-schema6-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          plugin_zip="${stage_dir}/codex-quota-scheduler_0.3.2_linux_amd64.zip"
+          plugin_unpacked="${stage_dir}/plugin-unpacked"
+          models_response="${stage_dir}/models.json"
+
+          cleanup() {
+            docker rm -f "$container_name" >/dev/null 2>&1 || true
+            rm -rf "$stage_dir"
+          }
+          trap cleanup EXIT
+
+          mkdir -p \
+            "${stage_dir}/auths" \
+            "${stage_dir}/logs" \
+            "${stage_dir}/plugins/linux/amd64" \
+            "$plugin_unpacked"
+
+          curl --fail --location --retry 3 --retry-all-errors \
+            "$scheduler_url" \
+            --output "$plugin_zip"
+          printf '%s  %s\n' "$scheduler_zip_sha256" "$plugin_zip" | sha256sum --check --status -
+
+          unzip -q "$plugin_zip" -d "$plugin_unpacked"
+          mapfile -t plugin_files < <(find "$plugin_unpacked" -type f -name '*.so' -print)
+          if [[ "${#plugin_files[@]}" -ne 1 ]]; then
+            echo 'scheduler archive must contain exactly codex-quota-scheduler.so' >&2
+            exit 1
+          fi
+          plugin_file="${plugin_files[0]}"
+          if [[ "$(basename "$plugin_file")" != "codex-quota-scheduler.so" ]]; then
+            echo 'scheduler archive must contain exactly codex-quota-scheduler.so' >&2
+            exit 1
+          fi
+          printf '%s  %s\n' "$scheduler_so_sha256" "$plugin_file" | sha256sum --check --status -
+          install -m 0755 \
+            "$plugin_file" \
+            "${stage_dir}/plugins/linux/amd64/codex-quota-scheduler.so"
+
+          cat > "${stage_dir}/config.yaml" <<'EOF'
+          host: 0.0.0.0
+          port: 8317
+          auth-dir: /ci-stage/auths
+          api-keys:
+            - schema6-ci-key
+          plugins:
+            enabled: true
+            dir: /ci-stage/plugins
+            configs:
+              codex-quota-scheduler:
+                enabled: true
+          logging-to-file: false
+          EOF
+
+          docker pull --platform linux/amd64 "$image_ref"
+          docker run --detach \
+            --name "$container_name" \
+            --platform linux/amd64 \
+            --publish 127.0.0.1:18317:8317 \
+            --cpus 1 \
+            --memory 512m \
+            --memory-swap 512m \
+            --restart no \
+            --volume "${stage_dir}:/ci-stage:rw" \
+            "$image_ref"
+
+          registration_log=''
+          registration_deadline=$((SECONDS + 60))
+          while (( SECONDS < registration_deadline )); do
+            registration_log="$(
+              docker logs "$container_name" 2>&1 |
+                grep -F 'pluginhost: plugin registered' |
+                grep -F 'plugin_id=codex-quota-scheduler' |
+                grep -F 'version=0.3.2' |
+                tail -n 1 || true
+            )"
+            if [[ -n "$registration_log" ]]; then
+              printf 'scheduler registration verified: %s\n' "$registration_log"
+              break
+            fi
+            if [[ "$(docker inspect --format='{{.State.Running}}' "$container_name" 2>/dev/null || true)" != true ]]; then
+              echo 'CI staging container exited before scheduler registration' >&2
+              exit 1
+            fi
+            sleep 2
+          done
+          if [[ -z "$registration_log" ]]; then
+            echo 'timed out waiting for codex-quota-scheduler v0.3.2 registration' >&2
+            exit 1
+          fi
+
+          models_http_code=''
+          models_deadline=$((SECONDS + 30))
+          while (( SECONDS < models_deadline )); do
+            models_http_code="$(
+              curl --silent --show-error \
+                --output "$models_response" \
+                --write-out '%{http_code}' \
+                --header "Authorization: Bearer ${staging_api_key}" \
+                'http://127.0.0.1:18317/v1/models' || true
+            )"
+            if [[ "$models_http_code" == 200 ]]; then
+              break
+            fi
+            sleep 2
+          done
+          if [[ "$models_http_code" != 200 ]]; then
+            echo "staging /v1/models returned HTTP ${models_http_code:-000}" >&2
+            exit 1
+          fi
+
+          python3 - "$models_response" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as response_file:
+              payload = json.load(response_file)
+          data = payload.get("data")
+          if not isinstance(data, list) or not data:
+              raise SystemExit("staging /v1/models returned an empty or invalid data list")
+          print(f"staging /v1/models verified with {len(data)} model(s)")
+          PY
