@@ -1,6 +1,9 @@
 name: candidate-image
 
 on:
+  push:
+    branches:
+      - codex/native-gemma-schema6
   workflow_dispatch:
 
 permissions:
