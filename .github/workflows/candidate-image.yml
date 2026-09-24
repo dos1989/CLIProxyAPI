@@ -92,6 +92,15 @@ jobs:
           }
           trap cleanup EXIT
 
+          print_registration_diagnostics() {
+            echo 'bounded CI staging log excerpt (sensitive lines omitted):'
+            docker logs "$container_name" 2>&1 |
+              tail -n 80 |
+              grep -E 'pluginhost:|error|warn|fatal|listen|started|config' |
+              grep -Eiv 'authorization|bearer|api[-_]?key|secret|token|password|credential' |
+              tail -n 40 || true
+          }
+
           mkdir -p \
             "${stage_dir}/auths" \
             "${stage_dir}/logs" \
@@ -144,7 +153,8 @@ jobs:
             --memory-swap 512m \
             --restart no \
             --volume "${stage_dir}:/ci-stage:rw" \
-            "$image_ref"
+            "$image_ref" \
+            --config /ci-stage/config.yaml
 
           registration_log=''
           registration_deadline=$((SECONDS + 60))
@@ -162,12 +172,14 @@ jobs:
             fi
             if [[ "$(docker inspect --format='{{.State.Running}}' "$container_name" 2>/dev/null || true)" != true ]]; then
               echo 'CI staging container exited before scheduler registration' >&2
+              print_registration_diagnostics
               exit 1
             fi
             sleep 2
           done
           if [[ -z "$registration_log" ]]; then
             echo 'timed out waiting for codex-quota-scheduler v0.3.2 registration' >&2
+            print_registration_diagnostics
             exit 1
           fi
 
