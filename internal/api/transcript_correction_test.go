@@ -26,6 +26,51 @@ func TestTranscriptCorrectionRejectsEmptyInput(t *testing.T) {
 	}
 }
 
+func TestTranscriptCorrectionRejectsTrailingJSON(t *testing.T) {
+	handler := newTranscriptCorrectionHandler(&config.Config{}, http.DefaultClient)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/transcript-corrections/gemma", strings.NewReader(`{"input":"文字"}{"input":"second"}`))
+	handler(ctx)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadRequest)
+	}
+}
+
+func TestTranscriptCorrectionRejectsOversizeInput(t *testing.T) {
+	handler := newTranscriptCorrectionHandler(&config.Config{}, http.DefaultClient)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	body := `{"input":"` + strings.Repeat("x", transcriptMaxInputBytes+1) + `"}`
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/transcript-corrections/gemma", strings.NewReader(body))
+	handler(ctx)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadRequest)
+	}
+}
+
+func TestTranscriptCorrectionHTTPClientDoesNotFollowRedirects(t *testing.T) {
+	targetRequests := 0
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		targetRequests++
+	}))
+	defer target.Close()
+	redirect := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusTemporaryRedirect)
+	}))
+	defer redirect.Close()
+	req, _ := http.NewRequest(http.MethodPost, redirect.URL, strings.NewReader("payload"))
+	req.Header.Set("CF-Access-Client-Secret", "must-not-leak")
+	response, err := newTranscriptCorrectionHTTPClient().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusTemporaryRedirect || targetRequests != 0 {
+		t.Fatalf("status=%d target_requests=%d", response.StatusCode, targetRequests)
+	}
+}
+
 func TestTranscriptCorrectionUsesFixedNativeLMStudioRequest(t *testing.T) {
 	var upstream map[string]any
 	upstreamServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

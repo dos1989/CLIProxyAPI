@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -13,9 +14,11 @@ import (
 )
 
 const (
-	transcriptGemmaAlias   = "gemma-4-26b"
-	transcriptGemmaRouteID = "vps-native:gemma-4-26b"
-	transcriptProviderName = "LM Studio MacBook"
+	transcriptGemmaAlias    = "gemma-4-26b"
+	transcriptGemmaRouteID  = "vps-native:gemma-4-26b"
+	transcriptProviderName  = "LM Studio MacBook"
+	transcriptMaxInputBytes = 64 * 1024
+	transcriptMaxBodyBytes  = 128 * 1024
 )
 
 type transcriptCorrectionRequest struct {
@@ -33,9 +36,10 @@ type nativeChatResponse struct {
 func newTranscriptCorrectionHandler(cfg *config.Config, client *http.Client) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var input transcriptCorrectionRequest
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, transcriptMaxBodyBytes)
 		decoder := json.NewDecoder(c.Request.Body)
 		decoder.DisallowUnknownFields()
-		if err := decoder.Decode(&input); err != nil || strings.TrimSpace(input.Input) == "" {
+		if err := decoder.Decode(&input); err != nil || decoder.Decode(&struct{}{}) != io.EOF || strings.TrimSpace(input.Input) == "" || len(input.Input) > transcriptMaxInputBytes {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid transcript correction request"})
 			return
 		}
@@ -102,6 +106,14 @@ func newTranscriptCorrectionHandler(cfg *config.Config, client *http.Client) gin
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"text": text, "model": transcriptGemmaRouteID})
+	}
+}
+
+func newTranscriptCorrectionHTTPClient() *http.Client {
+	return &http.Client{
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
 	}
 }
 
