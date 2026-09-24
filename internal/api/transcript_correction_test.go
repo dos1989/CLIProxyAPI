@@ -71,6 +71,28 @@ func TestTranscriptCorrectionHTTPClientDoesNotFollowRedirects(t *testing.T) {
 	}
 }
 
+func TestTranscriptCorrectionHTTPClientFollowsSameOriginRedirects(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.URL.Path == "/start" {
+			http.Redirect(w, r, "/finish", http.StatusTemporaryRedirect)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	req, _ := http.NewRequest(http.MethodPost, server.URL+"/start", strings.NewReader("payload"))
+	response, err := newTranscriptCorrectionHTTPClient().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK || requests != 2 {
+		t.Fatalf("status=%d requests=%d", response.StatusCode, requests)
+	}
+}
+
 func TestTranscriptCorrectionUsesFixedNativeLMStudioRequest(t *testing.T) {
 	var upstream map[string]any
 	upstreamServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

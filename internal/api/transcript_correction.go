@@ -111,8 +111,15 @@ func newTranscriptCorrectionHandler(cfg *config.Config, client *http.Client) gin
 
 func newTranscriptCorrectionHTTPClient() *http.Client {
 	return &http.Client{
-		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
-			return http.ErrUseLastResponse
+		CheckRedirect: func(request *http.Request, via []*http.Request) error {
+			if len(via) == 0 || len(via) > 10 {
+				return http.ErrUseLastResponse
+			}
+			origin := via[0].URL
+			if request.URL.Scheme != origin.Scheme || request.URL.Host != origin.Host {
+				return http.ErrUseLastResponse
+			}
+			return nil
 		},
 	}
 }
