@@ -154,6 +154,7 @@ jobs:
             --restart no \
             --volume "${stage_dir}:/ci-stage:rw" \
             "$image_ref" \
+            ./CLIProxyAPI \
             --config /ci-stage/config.yaml
 
           registration_log=''
