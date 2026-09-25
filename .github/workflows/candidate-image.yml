@@ -152,6 +152,7 @@ jobs:
             --memory 512m \
             --memory-swap 512m \
             --restart no \
+            --user "$(id -u):$(id -g)" \
             --volume "${stage_dir}:/ci-stage:rw" \
             "$image_ref" \
             ./CLIProxyAPI \
@@ -185,6 +186,7 @@ jobs:
           fi
 
           models_http_code=''
+          models_data_count=''
           models_deadline=$((SECONDS + 30))
           while (( SECONDS < models_deadline )); do
             models_http_code="$(
@@ -195,7 +197,23 @@ jobs:
                 'http://127.0.0.1:18317/v1/models' || true
             )"
             if [[ "$models_http_code" == 200 ]]; then
-              break
+              models_data_count="$(python3 - "$models_response" <<'PY'
+          import json
+          import sys
+
+          try:
+              with open(sys.argv[1], encoding="utf-8") as response_file:
+                  payload = json.load(response_file)
+              data = payload.get("data")
+          except (OSError, json.JSONDecodeError, TypeError, AttributeError):
+              data = None
+          print(len(data) if isinstance(data, list) else 0)
+          PY
+              )"
+              if [[ "$models_data_count" =~ ^[1-9][0-9]*$ ]]; then
+                echo "staging /v1/models verified with ${models_data_count} model(s)"
+                break
+              fi
             fi
             sleep 2
           done
@@ -203,15 +221,7 @@ jobs:
             echo "staging /v1/models returned HTTP ${models_http_code:-000}" >&2
             exit 1
           fi
-
-          python3 - "$models_response" <<'PY'
-          import json
-          import sys
-
-          with open(sys.argv[1], encoding="utf-8") as response_file:
-              payload = json.load(response_file)
-          data = payload.get("data")
-          if not isinstance(data, list) or not data:
-              raise SystemExit("staging /v1/models returned an empty or invalid data list")
-          print(f"staging /v1/models verified with {len(data)} model(s)")
-          PY
+          if ! [[ "$models_data_count" =~ ^[1-9][0-9]*$ ]]; then
+            echo 'staging /v1/models returned an empty or invalid data list' >&2
+            exit 1
+          fi
