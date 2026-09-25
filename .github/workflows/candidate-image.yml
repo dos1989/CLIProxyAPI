@@ -88,7 +88,7 @@ jobs:
 
           cleanup() {
             docker rm -f "$container_name" >/dev/null 2>&1 || true
-            rm -rf "$stage_dir"
+            rm -rf "$stage_dir" >/dev/null 2>&1 || true
           }
           trap cleanup EXIT
 
@@ -186,7 +186,7 @@ jobs:
           fi
 
           models_http_code=''
-          models_data_count=''
+          models_data_result=''
           models_deadline=$((SECONDS + 30))
           while (( SECONDS < models_deadline )); do
             models_http_code="$(
@@ -197,7 +197,7 @@ jobs:
                 'http://127.0.0.1:18317/v1/models' || true
             )"
             if [[ "$models_http_code" == 200 ]]; then
-              models_data_count="$(python3 - "$models_response" <<'PY'
+              models_data_result="$(python3 - "$models_response" <<'PY'
           import json
           import sys
 
@@ -205,13 +205,13 @@ jobs:
               with open(sys.argv[1], encoding="utf-8") as response_file:
                   payload = json.load(response_file)
               data = payload.get("data")
+              print(f"valid:{len(data)}" if isinstance(data, list) else "invalid")
           except (OSError, json.JSONDecodeError, TypeError, AttributeError):
-              data = None
-          print(len(data) if isinstance(data, list) else 0)
+              print("invalid")
           PY
               )"
-              if [[ "$models_data_count" =~ ^[1-9][0-9]*$ ]]; then
-                echo "staging /v1/models verified with ${models_data_count} model(s)"
+              if [[ "$models_data_result" == valid:* ]]; then
+                echo "staging /v1/models verified with ${models_data_result#valid:} model(s)"
                 break
               fi
             fi
@@ -221,7 +221,7 @@ jobs:
             echo "staging /v1/models returned HTTP ${models_http_code:-000}" >&2
             exit 1
           fi
-          if ! [[ "$models_data_count" =~ ^[1-9][0-9]*$ ]]; then
-            echo 'staging /v1/models returned an empty or invalid data list' >&2
+          if [[ "$models_data_result" != valid:* ]]; then
+            echo 'staging /v1/models returned invalid JSON or a non-list data field' >&2
             exit 1
           fi
